@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type PointerEvent, type WheelEvent } from 'react'
+import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type PointerEvent, type WheelEvent } from 'react'
 import { Grid3x3, Hand, Lock, Maximize2, Minus, MoveHorizontal, Plus, SlidersHorizontal } from 'lucide-react'
 import { PremiumPanel } from '../ui/PremiumPanel'
 
@@ -76,6 +76,30 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
   useEffect(() => {
     centerCanvas()
   }, [mobile])
+
+  useEffect(() => {
+    function handleDeleteRequest() {
+      deleteSelectedElement()
+    }
+
+    window.addEventListener('whiteboard:delete-selected', handleDeleteRequest)
+
+    return () => {
+      window.removeEventListener('whiteboard:delete-selected', handleDeleteRequest)
+    }
+  }, [selectedId])
+
+  function deleteSelectedElement() {
+    if (!selectedId) {
+      setStatus('Selecione um elemento para excluir')
+      return
+    }
+
+    setElements((current) => current.filter((element) => element.id !== selectedId))
+    setSelectedId(null)
+    setInteraction(null)
+    setStatus('Elemento excluído')
+  }
 
   function centerCanvas(nextZoom = zoom) {
     const bounds = viewportRef.current?.getBoundingClientRect()
@@ -283,6 +307,13 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
     }
   }
 
+  function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault()
+      deleteSelectedElement()
+    }
+  }
+
   const viewportClass = mobile
     ? 'canvas-reference-grid relative h-dvh overflow-hidden rounded-none border-0 bg-[#fffdf7] shadow-none outline-none focus:ring-2 focus:ring-[#d4af37]/35'
     : `${gridVisible ? 'canvas-reference-grid' : 'bg-[#fffdf7]'} absolute inset-3 overflow-hidden rounded-[14px] border border-[#cfd7e3] outline-none shadow-[inset_0_0_0_1px_rgba(255,255,255,0.68),0_16px_34px_rgba(15,27,46,0.08)] focus:ring-2 focus:ring-[#d4af37]/35`
@@ -297,6 +328,7 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
       onPointerCancel={handlePointerUp}
       onWheel={handleWheel}
       onPaste={handlePaste}
+      onKeyDown={handleKeyDown}
       className={viewportClass}
       role="application"
       aria-label={mobile ? 'Canvas interativo mobile do Whiteboard Studio' : 'Canvas interativo do Whiteboard Studio'}

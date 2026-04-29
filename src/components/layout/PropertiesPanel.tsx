@@ -37,6 +37,11 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
   const [grouped, setGrouped] = useState(false)
   const [collapsed, setCollapsed] = useState(false)
 
+  function requestDeleteSelectedElement() {
+    setLayerAction('delete')
+    window.dispatchEvent(new CustomEvent('whiteboard:delete-selected'))
+  }
+
   return (
     <PremiumPanel
       className={`${
@@ -148,7 +153,7 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
             <IconSquare icon={MoveUpIcon} label="Trazer para frente" active={layerAction === 'forward'} onClick={() => setLayerAction('forward')} />
             <IconSquare icon={MoveDownIcon} label="Enviar para tras" active={layerAction === 'backward'} onClick={() => setLayerAction('backward')} />
             <IconSquare icon={CopyIcon} label="Duplicar" active={layerAction === 'duplicate'} onClick={() => setLayerAction('duplicate')} />
-            <IconSquare icon={TrashIcon} label="Excluir" active={layerAction === 'delete'} onClick={() => setLayerAction('delete')} />
+            <IconSquare icon={TrashIcon} label="Excluir" active={layerAction === 'delete'} onClick={requestDeleteSelectedElement} />
           </div>
         </PanelSection>
 
