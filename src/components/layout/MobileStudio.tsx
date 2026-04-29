@@ -21,6 +21,12 @@ export function MobileStudio({ activeToolId, onToolChange }: MobileStudioProps) 
     label: item.id === 'share' ? 'Compartilhados' : item.label,
   }))
 
+  function handleMobileToolChange(toolId: string) {
+    onToolChange(toolId)
+    setToolsOpen(false)
+    setPropertiesOpen(false)
+  }
+
   return (
     <div className="relative min-h-dvh overflow-hidden bg-[#fffdf7] pb-28">
       <div className="fixed inset-x-0 top-0 z-30 h-[4.5rem] overflow-hidden border-b border-[#eae3d7] bg-white/96 backdrop-blur-xl">
@@ -37,7 +43,7 @@ export function MobileStudio({ activeToolId, onToolChange }: MobileStudioProps) 
         </div>
       </div>
 
-      <CanvasStage mobile />
+      <CanvasStage mobile activeToolId={activeToolId} />
 
       <nav className="fixed bottom-[calc(0.75rem+env(safe-area-inset-bottom))] left-1/2 z-40 w-[calc(100vw-2rem)] max-w-xl -translate-x-1/2">
         <div className="relative grid h-[5.55rem] grid-cols-[1fr_1fr_4.9rem_1fr_1fr] items-center rounded-[2rem] border border-[#d4af37]/20 bg-[#0f1b2e] px-3 pb-5 pt-3 shadow-[0_20px_42px_rgba(15,27,46,0.34),inset_0_1px_0_rgba(255,255,255,0.08)]">
@@ -84,7 +90,7 @@ export function MobileStudio({ activeToolId, onToolChange }: MobileStudioProps) 
       </nav>
 
       <BottomSheet open={toolsOpen} onClose={() => setToolsOpen(false)} title="Ferramentas">
-        <ToolDock activeToolId={activeToolId} onToolChange={onToolChange} mobile />
+        <ToolDock activeToolId={activeToolId} onToolChange={handleMobileToolChange} mobile />
       </BottomSheet>
 
       <BottomSheet open={propertiesOpen} onClose={() => setPropertiesOpen(false)} title="Propriedades">
