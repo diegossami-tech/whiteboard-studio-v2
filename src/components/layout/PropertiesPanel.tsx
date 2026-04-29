@@ -42,6 +42,24 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
     window.dispatchEvent(new CustomEvent('whiteboard:delete-selected'))
   }
 
+  function updateCanvasStyle(style: Record<string, string | number>) {
+    window.dispatchEvent(new CustomEvent('whiteboard:update-style', { detail: style }))
+  }
+
+  function requestLayerAction(action: 'forward' | 'backward' | 'duplicate') {
+    setLayerAction(action)
+    window.dispatchEvent(
+      new CustomEvent(action === 'duplicate' ? 'whiteboard:duplicate-selected' : 'whiteboard:layer-selected', {
+        detail: action,
+      }),
+    )
+  }
+
+  function requestAlignment(action: 'left' | 'center' | 'right' | 'distribute') {
+    setAlignment(action)
+    window.dispatchEvent(new CustomEvent('whiteboard:align-selected', { detail: action }))
+  }
+
   return (
     <PremiumPanel
       className={`${
@@ -78,7 +96,10 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
               <button
                 key={color.id}
                 type="button"
-                onClick={() => setSelectedColor(color.id)}
+                onClick={() => {
+                  setSelectedColor(color.id)
+                  updateCanvasStyle({ stroke: color.value })
+                }}
                 className={`h-7 w-7 rounded-full border border-white shadow-[0_8px_18px_rgba(15,27,46,0.12)] transition ${
                   selectedColor === color.id ? 'ring-2 ring-[#e2e8f0] ring-offset-2 ring-offset-[#fffdf7]' : ''
                 }`}
@@ -103,19 +124,40 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
 
         <PanelSection title="Traco">
           <div className="grid grid-cols-3 gap-3">
-            <StrokeButton id="solid" active={strokeStyle === 'solid'} onClick={setStrokeStyle} />
-            <StrokeButton id="dash" active={strokeStyle === 'dash'} onClick={setStrokeStyle} />
-            <StrokeButton id="dot" active={strokeStyle === 'dot'} onClick={setStrokeStyle} />
+            <StrokeButton id="solid" active={strokeStyle === 'solid'} onClick={(id) => {
+              setStrokeStyle(id)
+              updateCanvasStyle({ strokeStyle: id })
+            }} />
+            <StrokeButton id="dash" active={strokeStyle === 'dash'} onClick={(id) => {
+              setStrokeStyle(id)
+              updateCanvasStyle({ strokeStyle: id })
+            }} />
+            <StrokeButton id="dot" active={strokeStyle === 'dot'} onClick={(id) => {
+              setStrokeStyle(id)
+              updateCanvasStyle({ strokeStyle: id })
+            }} />
           </div>
         </PanelSection>
 
         <PanelSection title="Espessura">
           <div className="flex h-9 items-center overflow-hidden rounded-[8px] border border-[#e2e8f0] bg-white">
-            <SegmentButton icon={MinusIcon} label="Reduzir espessura" onClick={() => setThickness((value) => Math.max(1, value - 1))} />
+            <SegmentButton icon={MinusIcon} label="Reduzir espessura" onClick={() => {
+              setThickness((value) => {
+                const nextValue = Math.max(1, value - 1)
+                updateCanvasStyle({ strokeWidth: nextValue })
+                return nextValue
+              })
+            }} />
             <div className="h-5 w-px bg-[#e2e8f0]" />
             <div className="flex-1 text-center text-sm font-extrabold text-[#0f1b2e]">{thickness} px</div>
             <div className="h-5 w-px bg-[#e2e8f0]" />
-            <SegmentButton icon={PlusIcon} label="Aumentar espessura" onClick={() => setThickness((value) => Math.min(12, value + 1))} />
+            <SegmentButton icon={PlusIcon} label="Aumentar espessura" onClick={() => {
+              setThickness((value) => {
+                const nextValue = Math.min(12, value + 1)
+                updateCanvasStyle({ strokeWidth: nextValue })
+                return nextValue
+              })
+            }} />
           </div>
         </PanelSection>
 
@@ -136,7 +178,11 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
                 min="10"
                 max="100"
                 value={opacity}
-                onChange={(event) => setOpacity(Number(event.target.value))}
+                onChange={(event) => {
+                  const nextOpacity = Number(event.target.value)
+                  setOpacity(nextOpacity)
+                  updateCanvasStyle({ opacity: nextOpacity / 100 })
+                }}
                 className="absolute inset-0 h-5 w-full cursor-pointer opacity-0"
                 aria-label="Opacidade"
               />
@@ -150,26 +196,32 @@ export function PropertiesPanel({ mobile = false }: PropertiesPanelProps) {
 
         <PanelSection title="Camadas">
           <div className="grid grid-cols-4 gap-3">
-            <IconSquare icon={MoveUpIcon} label="Trazer para frente" active={layerAction === 'forward'} onClick={() => setLayerAction('forward')} />
-            <IconSquare icon={MoveDownIcon} label="Enviar para tras" active={layerAction === 'backward'} onClick={() => setLayerAction('backward')} />
-            <IconSquare icon={CopyIcon} label="Duplicar" active={layerAction === 'duplicate'} onClick={() => setLayerAction('duplicate')} />
+            <IconSquare icon={MoveUpIcon} label="Trazer para frente" active={layerAction === 'forward'} onClick={() => requestLayerAction('forward')} />
+            <IconSquare icon={MoveDownIcon} label="Enviar para tras" active={layerAction === 'backward'} onClick={() => requestLayerAction('backward')} />
+            <IconSquare icon={CopyIcon} label="Duplicar" active={layerAction === 'duplicate'} onClick={() => requestLayerAction('duplicate')} />
             <IconSquare icon={TrashIcon} label="Excluir" active={layerAction === 'delete'} onClick={requestDeleteSelectedElement} />
           </div>
         </PanelSection>
 
         <PanelSection title="Alinhamento">
           <div className="flex h-9 overflow-hidden rounded-[8px] border border-[#e2e8f0] bg-white">
-            <AlignButton icon={AlignLeftIcon} label="Alinhar a esquerda" active={alignment === 'left'} onClick={() => setAlignment('left')} />
-            <AlignButton icon={AlignCenterIcon} label="Alinhar ao centro" active={alignment === 'center'} onClick={() => setAlignment('center')} />
-            <AlignButton icon={GridIcon} label="Distribuir" active={alignment === 'distribute'} onClick={() => setAlignment('distribute')} />
-            <AlignButton icon={AlignRightIcon} label="Alinhar a direita" active={alignment === 'right'} onClick={() => setAlignment('right')} />
+            <AlignButton icon={AlignLeftIcon} label="Alinhar a esquerda" active={alignment === 'left'} onClick={() => requestAlignment('left')} />
+            <AlignButton icon={AlignCenterIcon} label="Alinhar ao centro" active={alignment === 'center'} onClick={() => requestAlignment('center')} />
+            <AlignButton icon={GridIcon} label="Distribuir" active={alignment === 'distribute'} onClick={() => requestAlignment('distribute')} />
+            <AlignButton icon={AlignRightIcon} label="Alinhar a direita" active={alignment === 'right'} onClick={() => requestAlignment('right')} />
           </div>
         </PanelSection>
 
         <PanelSection title="Acoes" isLast>
           <div className="grid grid-cols-2 gap-3">
-            <ActionButton icon={LockIcon} label={locked ? 'Bloqueado' : 'Bloquear'} active={locked} onClick={() => setLocked((isLocked) => !isLocked)} />
-            <ActionButton icon={GridIcon} label={grouped ? 'Agrupado' : 'Agrupar'} active={grouped} onClick={() => setGrouped((isGrouped) => !isGrouped)} />
+            <ActionButton icon={LockIcon} label={locked ? 'Bloqueado' : 'Bloquear'} active={locked} onClick={() => {
+              setLocked((isLocked) => !isLocked)
+              window.dispatchEvent(new CustomEvent('whiteboard:toggle-lock-selected'))
+            }} />
+            <ActionButton icon={GridIcon} label={grouped ? 'Agrupado' : 'Agrupar'} active={grouped} onClick={() => {
+              setGrouped((isGrouped) => !isGrouped)
+              window.dispatchEvent(new CustomEvent('whiteboard:group-selected'))
+            }} />
           </div>
         </PanelSection>
       </div>

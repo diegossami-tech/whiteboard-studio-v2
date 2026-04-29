@@ -22,7 +22,7 @@ export function DesktopStudio({ activeToolId, onToolChange }: DesktopStudioProps
         </div>
 
         <div className="min-h-0">
-          <CanvasStage activeToolId={activeToolId} />
+          <CanvasStage activeToolId={activeToolId} onToolChange={onToolChange} />
         </div>
 
         <div className="row-span-2 min-h-0">

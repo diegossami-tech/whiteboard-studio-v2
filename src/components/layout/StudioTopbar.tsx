@@ -21,20 +21,24 @@ export function StudioTopbar() {
 
   function runUndo() {
     setHistoryIndex((index) => Math.max(0, index - 1))
+    window.dispatchEvent(new CustomEvent('whiteboard:undo'))
     setStatus('Acao desfeita')
   }
 
   function runRedo() {
     setHistoryIndex((index) => Math.min(3, index + 1))
+    window.dispatchEvent(new CustomEvent('whiteboard:redo'))
     setStatus('Acao refeita')
   }
 
   function saveCloud() {
+    window.dispatchEvent(new CustomEvent('whiteboard:save'))
     setStatus('Salvo agora')
   }
 
   function toggleView() {
     setViewMode((currentMode) => (currentMode === 'Grade' ? 'Livre' : 'Grade'))
+    window.dispatchEvent(new CustomEvent('whiteboard:toggle-grid'))
     setStatus(viewMode === 'Grade' ? 'Modo livre ativo' : 'Grade ativa')
   }
 
@@ -74,6 +78,29 @@ export function StudioTopbar() {
                 {project}
               </button>
             ))}
+            <div className="my-1 h-px bg-[var(--ws-line)]" />
+            <button
+              type="button"
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('whiteboard:export-json'))
+                setStatus('JSON exportado')
+                setProjectMenuOpen(false)
+              }}
+              className="w-full rounded-[12px] px-3 py-2 text-left text-sm font-bold text-[var(--ws-navy)] hover:bg-[rgba(214,160,76,0.1)]"
+            >
+              Exportar JSON
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                window.dispatchEvent(new CustomEvent('whiteboard:export-svg'))
+                setStatus('SVG exportado')
+                setProjectMenuOpen(false)
+              }}
+              className="w-full rounded-[12px] px-3 py-2 text-left text-sm font-bold text-[var(--ws-navy)] hover:bg-[rgba(214,160,76,0.1)]"
+            >
+              Exportar SVG
+            </button>
           </div>
         )}
       </div>

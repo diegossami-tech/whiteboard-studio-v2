@@ -1,10 +1,21 @@
-import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type PointerEvent, type WheelEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type ComponentType,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+  type WheelEvent,
+} from 'react'
 import { Grid3x3, Hand, Lock, Maximize2, Minus, MoveHorizontal, Plus, SlidersHorizontal } from 'lucide-react'
 import { PremiumPanel } from '../ui/PremiumPanel'
 
 type CanvasStageProps = {
   mobile?: boolean
   activeToolId?: string
+  onToolChange?: (toolId: string) => void
 }
 
 type Point = {
@@ -12,41 +23,56 @@ type Point = {
   y: number
 }
 
-type CanvasElement =
-  | {
-      id: string
-      type: 'shape' | 'circle' | 'text' | 'note' | 'image' | 'motif'
-      x: number
-      y: number
-      width: number
-      height: number
-      content?: string
-      src?: string
-    }
-  | {
-      id: string
-      type: 'line' | 'arrow'
-      x: number
-      y: number
-      width: number
-      height: number
-    }
-  | {
-      id: string
-      type: 'draw'
-      points: Point[]
-    }
+type CanvasElementType = 'shape' | 'circle' | 'text' | 'note' | 'image' | 'motif' | 'line' | 'arrow' | 'draw'
+type StrokeStyle = 'solid' | 'dash' | 'dot'
+
+type CanvasElement = {
+  id: string
+  type: CanvasElementType
+  x: number
+  y: number
+  width: number
+  height: number
+  content?: string
+  src?: string
+  points?: Point[]
+  stroke: string
+  fill: string
+  strokeWidth: number
+  opacity: number
+  strokeStyle: StrokeStyle
+  locked?: boolean
+  groupId?: string
+}
+
+type MoveOrigin = {
+  x: number
+  y: number
+  points?: Point[]
+}
 
 type Interaction =
   | { type: 'pan'; start: Point; origin: Point }
-  | { type: 'move'; id: string; start: Point; origin: Point }
+  | { type: 'move'; ids: string[]; start: Point; origins: Record<string, MoveOrigin> }
   | { type: 'create'; id: string; start: Point }
   | { type: 'draw'; id: string }
+  | { type: 'resize'; id: string; start: Point; origin: { x: number; y: number; width: number; height: number } }
+  | { type: 'select-box'; start: Point; current: Point }
   | null
 
 const WORLD_WIDTH = 6200
 const WORLD_HEIGHT = 4200
 const WORLD_CENTER = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 }
+const GRID_SIZE = 24
+const STORAGE_KEY = 'whiteboard-studio-v2.board'
+
+const defaultStyle = {
+  stroke: '#c78e2b',
+  fill: 'rgba(255, 255, 255, 0.32)',
+  strokeWidth: 2,
+  opacity: 1,
+  strokeStyle: 'solid' as StrokeStyle,
+}
 
 const initialElements: CanvasElement[] = [
   {
@@ -57,48 +83,293 @@ const initialElements: CanvasElement[] = [
     width: 230,
     height: 126,
     content: 'Escolha uma ferramenta e clique ou arraste no canvas.',
+    stroke: '#c78e2b',
+    fill: '#fff0b8',
+    strokeWidth: 2,
+    opacity: 1,
+    strokeStyle: 'solid',
   },
 ]
 
-export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasStageProps) {
+export function CanvasStage({ mobile = false, activeToolId = 'select', onToolChange }: CanvasStageProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null)
-  const [elements, setElements] = useState<CanvasElement[]>(initialElements)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [elements, setElements] = useState<CanvasElement[]>(() => loadStoredElements() ?? initialElements)
+  const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [interaction, setInteraction] = useState<Interaction>(null)
   const [pan, setPan] = useState<Point>({ x: 0, y: 0 })
   const [zoom, setZoom] = useState(1)
   const [gridVisible, setGridVisible] = useState(true)
   const [minimapVisible, setMinimapVisible] = useState(true)
-  const [locked, setLocked] = useState(false)
+  const [viewportLocked, setViewportLocked] = useState(false)
   const [activeControl, setActiveControl] = useState('pan')
   const [status, setStatus] = useState('Pronto')
+  const [clipboardElements, setClipboardElements] = useState<CanvasElement[]>([])
+  const [history, setHistory] = useState<CanvasElement[][]>([])
+  const [future, setFuture] = useState<CanvasElement[][]>([])
 
   useEffect(() => {
     centerCanvas()
   }, [mobile])
 
   useEffect(() => {
+    const payload = JSON.stringify({ elements })
+    window.localStorage.setItem(STORAGE_KEY, payload)
+  }, [elements])
+
+  useEffect(() => {
     function handleDeleteRequest() {
-      deleteSelectedElement()
+      deleteSelectedElements()
+    }
+
+    function handleDuplicateRequest() {
+      duplicateSelectedElements()
+    }
+
+    function handleLayerRequest(event: Event) {
+      const action = (event as CustomEvent<string>).detail
+      moveSelectedLayer(action)
+    }
+
+    function handleAlignRequest(event: Event) {
+      const action = (event as CustomEvent<string>).detail
+      alignSelectedElements(action)
+    }
+
+    function handleStyleRequest(event: Event) {
+      const style = (event as CustomEvent<Partial<Pick<CanvasElement, 'stroke' | 'fill' | 'strokeWidth' | 'opacity' | 'strokeStyle'>>>).detail
+      applySelectedStyle(style)
+    }
+
+    function handleToggleLockRequest() {
+      toggleSelectedLock()
+    }
+
+    function handleGroupRequest() {
+      groupSelectedElements()
+    }
+
+    function handleUndoRequest() {
+      undo()
+    }
+
+    function handleRedoRequest() {
+      redo()
+    }
+
+    function handleSaveRequest() {
+      saveBoard()
+    }
+
+    function handleExportJsonRequest() {
+      exportJson()
+    }
+
+    function handleExportSvgRequest() {
+      exportSvg()
+    }
+
+    function handleToggleGridRequest() {
+      setGridVisible((visible) => !visible)
     }
 
     window.addEventListener('whiteboard:delete-selected', handleDeleteRequest)
+    window.addEventListener('whiteboard:duplicate-selected', handleDuplicateRequest)
+    window.addEventListener('whiteboard:layer-selected', handleLayerRequest)
+    window.addEventListener('whiteboard:align-selected', handleAlignRequest)
+    window.addEventListener('whiteboard:update-style', handleStyleRequest)
+    window.addEventListener('whiteboard:toggle-lock-selected', handleToggleLockRequest)
+    window.addEventListener('whiteboard:group-selected', handleGroupRequest)
+    window.addEventListener('whiteboard:undo', handleUndoRequest)
+    window.addEventListener('whiteboard:redo', handleRedoRequest)
+    window.addEventListener('whiteboard:save', handleSaveRequest)
+    window.addEventListener('whiteboard:export-json', handleExportJsonRequest)
+    window.addEventListener('whiteboard:export-svg', handleExportSvgRequest)
+    window.addEventListener('whiteboard:toggle-grid', handleToggleGridRequest)
 
     return () => {
       window.removeEventListener('whiteboard:delete-selected', handleDeleteRequest)
+      window.removeEventListener('whiteboard:duplicate-selected', handleDuplicateRequest)
+      window.removeEventListener('whiteboard:layer-selected', handleLayerRequest)
+      window.removeEventListener('whiteboard:align-selected', handleAlignRequest)
+      window.removeEventListener('whiteboard:update-style', handleStyleRequest)
+      window.removeEventListener('whiteboard:toggle-lock-selected', handleToggleLockRequest)
+      window.removeEventListener('whiteboard:group-selected', handleGroupRequest)
+      window.removeEventListener('whiteboard:undo', handleUndoRequest)
+      window.removeEventListener('whiteboard:redo', handleRedoRequest)
+      window.removeEventListener('whiteboard:save', handleSaveRequest)
+      window.removeEventListener('whiteboard:export-json', handleExportJsonRequest)
+      window.removeEventListener('whiteboard:export-svg', handleExportSvgRequest)
+      window.removeEventListener('whiteboard:toggle-grid', handleToggleGridRequest)
     }
-  }, [selectedId])
+  }, [elements, selectedIds, history, future])
 
-  function deleteSelectedElement() {
-    if (!selectedId) {
+  function pushHistory(snapshot = elements) {
+    setHistory((current) => [...current.slice(-39), snapshot.map(cloneElement)])
+    setFuture([])
+  }
+
+  function commitElements(nextElements: CanvasElement[], message: string, nextSelection = selectedIds) {
+    pushHistory()
+    setElements(nextElements)
+    setSelectedIds(nextSelection)
+    setStatus(message)
+  }
+
+  function deleteSelectedElements() {
+    if (!selectedIds.length) {
       setStatus('Selecione um elemento para excluir')
       return
     }
 
-    setElements((current) => current.filter((element) => element.id !== selectedId))
-    setSelectedId(null)
+    const nextElements = elements.filter((element) => !selectedIds.includes(element.id) || element.locked)
+    const removed = elements.length - nextElements.length
+
+    if (!removed) {
+      setStatus('Elemento bloqueado')
+      return
+    }
+
+    commitElements(nextElements, removed > 1 ? 'Elementos excluidos' : 'Elemento excluido', [])
     setInteraction(null)
-    setStatus('Elemento excluído')
+  }
+
+  function duplicateSelectedElements() {
+    if (!selectedIds.length) {
+      setStatus('Selecione algo para duplicar')
+      return
+    }
+
+    const copies = elements
+      .filter((element) => selectedIds.includes(element.id))
+      .map((element) => ({
+        ...cloneElement(element),
+        id: `${element.type}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        x: element.x + 36,
+        y: element.y + 36,
+        points: element.points?.map((point) => ({ x: point.x + 36, y: point.y + 36 })),
+      }))
+
+    commitElements([...elements, ...copies], 'Duplicado', copies.map((element) => element.id))
+  }
+
+  function moveSelectedLayer(action: string) {
+    if (!selectedIds.length) {
+      setStatus('Selecione uma camada')
+      return
+    }
+
+    const selected = elements.filter((element) => selectedIds.includes(element.id))
+    const rest = elements.filter((element) => !selectedIds.includes(element.id))
+    const nextElements = action === 'backward' ? [...selected, ...rest] : [...rest, ...selected]
+    commitElements(nextElements, action === 'backward' ? 'Enviado para tras' : 'Trazido para frente')
+  }
+
+  function alignSelectedElements(action: string) {
+    const selected = elements.filter((element) => selectedIds.includes(element.id) && !element.locked)
+
+    if (selected.length < 2 && action === 'distribute') {
+      setStatus('Distribuir requer 2 ou mais elementos')
+      return
+    }
+
+    if (!selected.length) {
+      setStatus('Selecione elementos para alinhar')
+      return
+    }
+
+    const bounds = getSelectionBounds(selected)
+    const sorted = [...selected].sort((a, b) => a.x - b.x)
+    const gap = selected.length > 1 ? (bounds.width - selected.reduce((sum, element) => sum + element.width, 0)) / (selected.length - 1) : 0
+
+    const nextElements = elements.map((element) => {
+      if (!selectedIds.includes(element.id) || element.locked) return element
+
+      if (action === 'left') return { ...element, x: bounds.x }
+      if (action === 'center') return { ...element, x: bounds.x + bounds.width / 2 - element.width / 2 }
+      if (action === 'right') return { ...element, x: bounds.x + bounds.width - element.width }
+
+      if (action === 'distribute') {
+        const index = sorted.findIndex((item) => item.id === element.id)
+        const previousWidth = sorted.slice(0, index).reduce((sum, item) => sum + item.width, 0)
+        return { ...element, x: bounds.x + previousWidth + gap * index }
+      }
+
+      return element
+    })
+
+    commitElements(nextElements, 'Alinhamento aplicado')
+  }
+
+  function applySelectedStyle(style: Partial<Pick<CanvasElement, 'stroke' | 'fill' | 'strokeWidth' | 'opacity' | 'strokeStyle'>>) {
+    if (!selectedIds.length) {
+      setStatus('Selecione um elemento para estilizar')
+      return
+    }
+
+    commitElements(
+      elements.map((element) => (selectedIds.includes(element.id) && !element.locked ? { ...element, ...style } : element)),
+      'Estilo aplicado',
+    )
+  }
+
+  function toggleSelectedLock() {
+    if (!selectedIds.length) {
+      setStatus('Selecione um elemento para bloquear')
+      return
+    }
+
+    commitElements(
+      elements.map((element) => (selectedIds.includes(element.id) ? { ...element, locked: !element.locked } : element)),
+      'Bloqueio alternado',
+    )
+  }
+
+  function groupSelectedElements() {
+    if (selectedIds.length < 2) {
+      setStatus('Selecione 2 ou mais elementos')
+      return
+    }
+
+    const groupId = `group-${Date.now()}`
+    commitElements(
+      elements.map((element) => (selectedIds.includes(element.id) ? { ...element, groupId } : element)),
+      'Grupo criado',
+    )
+  }
+
+  function undo() {
+    const previous = history.at(-1)
+
+    if (!previous) {
+      setStatus('Nada para desfazer')
+      return
+    }
+
+    setFuture((current) => [elements.map(cloneElement), ...current.slice(0, 39)])
+    setElements(previous.map(cloneElement))
+    setHistory((current) => current.slice(0, -1))
+    setSelectedIds([])
+    setStatus('Acao desfeita')
+  }
+
+  function redo() {
+    const next = future[0]
+
+    if (!next) {
+      setStatus('Nada para refazer')
+      return
+    }
+
+    setHistory((current) => [...current.slice(-39), elements.map(cloneElement)])
+    setElements(next.map(cloneElement))
+    setFuture((current) => current.slice(1))
+    setSelectedIds([])
+    setStatus('Acao refeita')
+  }
+
+  function saveBoard() {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ elements }))
+    setStatus('Salvo neste navegador')
   }
 
   function centerCanvas(nextZoom = zoom) {
@@ -130,11 +401,11 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
   }
 
   function zoomAt(nextZoom: number, anchor?: Point) {
-    if (locked) {
+    if (viewportLocked) {
       return
     }
 
-    const clampedZoom = Math.min(2.5, Math.max(0.25, nextZoom))
+    const clampedZoom = Math.min(3, Math.max(0.12, nextZoom))
     const bounds = viewportRef.current?.getBoundingClientRect()
     const screenAnchor = anchor ?? (bounds ? { x: bounds.width / 2, y: bounds.height / 2 } : { x: 0, y: 0 })
     const worldAnchor = {
@@ -151,10 +422,11 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
 
   function addElement(type: string, point: Point, content?: string, src?: string) {
     const id = `${type}-${Date.now()}`
-    const element = createCanvasElement(id, type, point, content, src)
+    const element = createCanvasElement(id, type, snapPoint(point), content, src)
 
+    pushHistory()
     setElements((current) => [...current, element])
-    setSelectedId(id)
+    setSelectedIds([id])
     setStatus(`${getToolLabel(type)} criado`)
     return element
   }
@@ -164,14 +436,14 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
   }
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
-    if ((event.target as HTMLElement).closest('button')) {
+    if ((event.target as HTMLElement).closest('[data-canvas-control="true"]')) {
       return
     }
 
     viewportRef.current?.focus()
     const point = screenToWorld(event.clientX, event.clientY)
 
-    if (activeToolId === 'hand') {
+    if (activeToolId === 'hand' || event.button === 1) {
       setInteraction({ type: 'pan', start: { x: event.clientX, y: event.clientY }, origin: pan })
       setStatus('Movendo canvas')
       event.currentTarget.setPointerCapture(event.pointerId)
@@ -179,15 +451,33 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
     }
 
     if (activeToolId === 'select') {
-      setSelectedId(null)
-      setStatus('Seleção limpa')
+      setInteraction({ type: 'select-box', start: point, current: point })
+      setStatus('Selecionando area')
+      event.currentTarget.setPointerCapture(event.pointerId)
       return
     }
 
     if (activeToolId === 'draw') {
       const id = `draw-${Date.now()}`
-      setElements((current) => [...current, { id, type: 'draw', points: [point] }])
-      setSelectedId(id)
+      pushHistory()
+      setElements((current) => [
+        ...current,
+        {
+          id,
+          type: 'draw',
+          x: point.x,
+          y: point.y,
+          width: 1,
+          height: 1,
+          points: [point],
+          stroke: '#0f1b2e',
+          fill: 'transparent',
+          strokeWidth: 3,
+          opacity: 1,
+          strokeStyle: 'solid',
+        },
+      ])
+      setSelectedIds([id])
       setInteraction({ type: 'draw', id })
       setStatus('Desenhando')
       event.currentTarget.setPointerCapture(event.pointerId)
@@ -195,24 +485,81 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
     }
 
     const created = addElement(activeToolId, point)
-    setInteraction({ type: 'create', id: created.id, start: point })
+    setInteraction({ type: 'create', id: created.id, start: snapPoint(point) })
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
-  function handleElementPointerDown(event: PointerEvent<HTMLButtonElement>, element: CanvasElement) {
+  function handleElementPointerDown(event: PointerEvent<HTMLDivElement>, element: CanvasElement) {
     event.stopPropagation()
     viewportRef.current?.focus()
-    setSelectedId(element.id)
+
+    const relatedIds = element.groupId
+      ? elements.filter((item) => item.groupId === element.groupId).map((item) => item.id)
+      : [element.id]
+
+    const nextSelection = event.shiftKey
+      ? toggleIds(selectedIds, relatedIds)
+      : selectedIds.includes(element.id)
+        ? selectedIds
+        : relatedIds
+
+    setSelectedIds(nextSelection)
     setStatus(`${getToolLabel(element.type)} selecionado`)
 
-    if (activeToolId !== 'select') {
+    if (activeToolId !== 'select' || element.locked) {
       return
     }
 
+    pushHistory()
     const point = screenToWorld(event.clientX, event.clientY)
-    const origin = element.type === 'draw' ? { x: 0, y: 0 } : { x: element.x, y: element.y }
-    setInteraction({ type: 'move', id: element.id, start: point, origin })
+    const origins = Object.fromEntries(
+      elements
+        .filter((item) => nextSelection.includes(item.id))
+        .map((item) => [item.id, { x: item.x, y: item.y, points: item.points?.map((pathPoint) => ({ ...pathPoint })) }]),
+    )
+
+    setInteraction({ type: 'move', ids: nextSelection, start: point, origins })
     event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function handleResizePointerDown(event: PointerEvent<HTMLDivElement>, element: CanvasElement) {
+    event.stopPropagation()
+    viewportRef.current?.focus()
+
+    if (element.locked) {
+      setStatus('Elemento bloqueado')
+      return
+    }
+
+    pushHistory()
+    setSelectedIds([element.id])
+    setInteraction({
+      type: 'resize',
+      id: element.id,
+      start: screenToWorld(event.clientX, event.clientY),
+      origin: { x: element.x, y: element.y, width: element.width, height: element.height },
+    })
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function handleElementDoubleClick(event: React.MouseEvent<HTMLDivElement>, element: CanvasElement) {
+    event.stopPropagation()
+
+    if (element.locked || (element.type !== 'text' && element.type !== 'note')) {
+      return
+    }
+
+    const nextText = window.prompt('Editar texto', element.content ?? '')
+
+    if (nextText === null) {
+      return
+    }
+
+    commitElements(
+      elements.map((item) => (item.id === element.id ? { ...item, content: nextText } : item)),
+      'Texto editado',
+      [element.id],
+    )
   }
 
   function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
@@ -230,39 +577,85 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
       return
     }
 
+    if (interaction.type === 'select-box') {
+      setInteraction({ ...interaction, current: point })
+      return
+    }
+
     if (interaction.type === 'draw') {
-      updateElement(interaction.id, (element) =>
-        element.type === 'draw' ? { ...element, points: [...element.points, point] } : element,
-      )
+      updateElement(interaction.id, (element) => {
+        if (element.type !== 'draw') return element
+
+        const points = [...(element.points ?? []), point]
+        return { ...element, ...getPathBounds(points), points }
+      })
       return
     }
 
     if (interaction.type === 'create') {
-      updateElement(interaction.id, (element) => resizeElementFromDrag(element, interaction.start, point))
+      updateElement(interaction.id, (element) => resizeElementFromDrag(element, interaction.start, snapPoint(point)))
+      return
+    }
+
+    if (interaction.type === 'resize') {
+      updateElement(interaction.id, (element) => {
+        if (element.type === 'draw') return element
+
+        const snapped = snapPoint(point)
+        return {
+          ...element,
+          width: Math.max(24, snapped.x - interaction.origin.x),
+          height: Math.max(24, snapped.y - interaction.origin.y),
+        }
+      })
       return
     }
 
     if (interaction.type === 'move') {
-      const dx = point.x - interaction.start.x
-      const dy = point.y - interaction.start.y
+      const snappedPoint = snapPoint(point)
+      const dx = snappedPoint.x - snapPoint(interaction.start).x
+      const dy = snappedPoint.y - snapPoint(interaction.start).y
 
-      updateElement(interaction.id, (element) => {
-        if (element.type === 'draw') {
-          return {
-            ...element,
-            points: element.points.map((pathPoint) => ({ x: pathPoint.x + dx, y: pathPoint.y + dy })),
+      setElements((current) =>
+        current.map((element) => {
+          if (!interaction.ids.includes(element.id) || element.locked) {
+            return element
           }
-        }
 
-        return { ...element, x: interaction.origin.x + dx, y: interaction.origin.y + dy }
-      })
+          const origin = interaction.origins[element.id]
+
+          if (!origin) {
+            return element
+          }
+
+          if (element.type === 'draw') {
+            const points = origin.points?.map((pathPoint) => ({ x: pathPoint.x + dx, y: pathPoint.y + dy })) ?? element.points
+            return { ...element, ...getPathBounds(points ?? []), points }
+          }
+
+          return { ...element, x: origin.x + dx, y: origin.y + dy }
+        }),
+      )
     }
   }
 
   function handlePointerUp(event: PointerEvent<HTMLDivElement>) {
+    if (interaction?.type === 'select-box') {
+      const box = normalizeBox(interaction.start, interaction.current)
+
+      if (box.width < 4 && box.height < 4) {
+        setSelectedIds([])
+        setStatus('Selecao limpa')
+      } else {
+        const selected = elements.filter((element) => intersects(box, element)).map((element) => element.id)
+        setSelectedIds(selected)
+        setStatus(selected.length ? `${selected.length} selecionado(s)` : 'Nada selecionado')
+      }
+    }
+
     if (interaction) {
       setInteraction(null)
-      setStatus('Pronto')
+      if (interaction.type !== 'select-box') setStatus('Pronto')
       try {
         event.currentTarget.releasePointerCapture(event.pointerId)
       } catch {
@@ -280,7 +673,7 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
       return
     }
 
-    if (activeToolId === 'hand' || event.shiftKey) {
+    if (!viewportLocked) {
       setPan((current) => ({ x: current.x - event.deltaX, y: current.y - event.deltaY }))
     }
   }
@@ -288,10 +681,7 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
   function handlePaste(event: ClipboardEvent<HTMLDivElement>) {
     const imageFile = Array.from(event.clipboardData.files).find((file) => file.type.startsWith('image/'))
     const text = event.clipboardData.getData('text/plain')
-    const bounds = viewportRef.current?.getBoundingClientRect()
-    const center = bounds
-      ? screenToWorld(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2)
-      : WORLD_CENTER
+    const center = getViewportCenter()
 
     if (imageFile) {
       event.preventDefault()
@@ -303,20 +693,139 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
 
     if (text.trim()) {
       event.preventDefault()
-      addElement('text', center, text.trim().slice(0, 160))
+      try {
+        const parsed = JSON.parse(text) as { whiteboardStudioElements?: CanvasElement[] }
+        if (Array.isArray(parsed.whiteboardStudioElements)) {
+          pasteInternal(parsed.whiteboardStudioElements, center)
+          return
+        }
+      } catch {
+        // Plain text paste remains supported.
+      }
+
+      addElement('text', center, text.trim().slice(0, 220))
+      return
+    }
+
+    if (clipboardElements.length) {
+      event.preventDefault()
+      pasteInternal(clipboardElements, center)
     }
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const isMod = event.ctrlKey || event.metaKey
+    const key = event.key.toLowerCase()
+
     if (event.key === 'Delete' || event.key === 'Backspace') {
       event.preventDefault()
-      deleteSelectedElement()
+      deleteSelectedElements()
+      return
     }
+
+    if (isMod && key === 'z' && !event.shiftKey) {
+      event.preventDefault()
+      undo()
+      return
+    }
+
+    if ((isMod && key === 'y') || (isMod && event.shiftKey && key === 'z')) {
+      event.preventDefault()
+      redo()
+      return
+    }
+
+    if (isMod && key === 's') {
+      event.preventDefault()
+      saveBoard()
+      return
+    }
+
+    if (isMod && key === 'd') {
+      event.preventDefault()
+      duplicateSelectedElements()
+      return
+    }
+
+    if (isMod && key === 'c') {
+      event.preventDefault()
+      copySelectedElements()
+      return
+    }
+
+    if (isMod && key === 'x') {
+      event.preventDefault()
+      copySelectedElements()
+      deleteSelectedElements()
+      return
+    }
+
+    if (isMod && key === 'v' && clipboardElements.length) {
+      event.preventDefault()
+      pasteInternal(clipboardElements, getViewportCenter())
+      return
+    }
+
+    const shortcutTool = getToolFromShortcut(key)
+
+    if (shortcutTool && onToolChange) {
+      event.preventDefault()
+      onToolChange(shortcutTool)
+      setStatus(`${getToolLabel(shortcutTool)} ativo`)
+    }
+  }
+
+  function copySelectedElements() {
+    const copied = elements.filter((element) => selectedIds.includes(element.id)).map(cloneElement)
+
+    if (!copied.length) {
+      setStatus('Nada selecionado para copiar')
+      return
+    }
+
+    setClipboardElements(copied)
+    const payload = JSON.stringify({ whiteboardStudioElements: copied })
+    void navigator.clipboard?.writeText(payload).catch(() => undefined)
+    setStatus('Copiado')
+  }
+
+  function pasteInternal(sourceElements: CanvasElement[], center: Point) {
+    if (!sourceElements.length) return
+
+    const bounds = getSelectionBounds(sourceElements)
+    const offset = { x: center.x - (bounds.x + bounds.width / 2), y: center.y - (bounds.y + bounds.height / 2) }
+    const copies = sourceElements.map((element) => ({
+      ...cloneElement(element),
+      id: `${element.type}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      x: snap(element.x + offset.x),
+      y: snap(element.y + offset.y),
+      points: element.points?.map((point) => ({ x: snap(point.x + offset.x), y: snap(point.y + offset.y) })),
+      groupId: element.groupId ? `group-${Date.now()}` : undefined,
+    }))
+
+    commitElements([...elements, ...copies], 'Colado', copies.map((element) => element.id))
+  }
+
+  function getViewportCenter() {
+    const bounds = viewportRef.current?.getBoundingClientRect()
+    return bounds ? screenToWorld(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2) : WORLD_CENTER
+  }
+
+  function exportJson() {
+    downloadFile('whiteboard-studio-board.json', 'application/json', JSON.stringify({ elements }, null, 2))
+    setStatus('JSON exportado')
+  }
+
+  function exportSvg() {
+    const svg = createSvgExport(elements)
+    downloadFile('whiteboard-studio-board.svg', 'image/svg+xml', svg)
+    setStatus('SVG exportado')
   }
 
   const viewportClass = mobile
     ? 'canvas-reference-grid relative h-dvh overflow-hidden rounded-none border-0 bg-[#fffdf7] shadow-none outline-none focus:ring-2 focus:ring-[#d4af37]/35'
     : `${gridVisible ? 'canvas-reference-grid' : 'bg-[#fffdf7]'} absolute inset-3 overflow-hidden rounded-[14px] border border-[#cfd7e3] outline-none shadow-[inset_0_0_0_1px_rgba(255,255,255,0.68),0_16px_34px_rgba(15,27,46,0.08)] focus:ring-2 focus:ring-[#d4af37]/35`
+  const selectionBox = interaction?.type === 'select-box' ? normalizeBox(interaction.start, interaction.current) : null
 
   const canvas = (
     <div
@@ -364,20 +873,31 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
           <CanvasElementView
             key={element.id}
             element={element}
-            selected={element.id === selectedId}
+            selected={selectedIds.includes(element.id)}
             onPointerDown={(event) => handleElementPointerDown(event, element)}
+            onDoubleClick={(event) => handleElementDoubleClick(event, element)}
+            onResizePointerDown={(event) => handleResizePointerDown(event, element)}
           />
         ))}
+
+        {selectionBox && (
+          <div
+            className="pointer-events-none absolute border border-[#2563eb] bg-[#2563eb]/8"
+            style={{ left: selectionBox.x, top: selectionBox.y, width: selectionBox.width, height: selectionBox.height }}
+          />
+        )}
+
+        <CollaborationHints />
       </div>
 
       {!mobile && (
         <>
-          <div className="absolute right-4 top-4 z-20 flex h-11 items-center rounded-[10px] border border-[#d7dee8] bg-white/94 px-2 shadow-[0_12px_26px_rgba(15,27,46,0.13)]">
+          <div className="absolute right-4 top-4 z-20 flex h-11 items-center rounded-[10px] border border-[#d7dee8] bg-white/94 px-2 shadow-[0_12px_26px_rgba(15,27,46,0.13)]" data-canvas-control="true">
             <CanvasToolButton icon={Hand} label="Mover canvas" active={activeControl === 'pan'} onClick={() => setActiveControl('pan')} />
             <ToolbarDivider />
-            <CanvasToolButton icon={SlidersHorizontal} label="Ajustes de visualização" active={activeControl === 'settings'} onClick={() => setActiveControl('settings')} />
+            <CanvasToolButton icon={SlidersHorizontal} label="Exportar SVG" active={activeControl === 'settings'} onClick={exportSvg} />
             <ToolbarDivider />
-            <CanvasToolButton icon={MoveHorizontal} label="Alinhar elementos" active={activeControl === 'align'} onClick={() => setActiveControl('align')} />
+            <CanvasToolButton icon={MoveHorizontal} label="Alinhar elementos" active={activeControl === 'align'} onClick={() => alignSelectedElements('center')} />
             <ToolbarDivider />
             <CanvasToolButton icon={Grid3x3} label="Alternar grid" active={gridVisible} onClick={() => setGridVisible((visible) => !visible)} />
           </div>
@@ -389,17 +909,28 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
               className="ws-icon-button absolute bottom-6 right-6 z-20 rounded-[12px] p-3"
               aria-label="Fechar minimapa"
               title="Fechar minimapa"
+              data-canvas-control="true"
             >
               <div className="relative h-[82px] w-[118px] overflow-hidden rounded-[8px] bg-[#f8f4ed]">
                 <div className="absolute left-4 top-6 h-11 w-16 bg-[#eee6da]" />
                 <div className="absolute right-3 top-3 h-10 w-20 bg-[#f3ede5]" />
                 <div className="absolute left-9 top-5 h-13 w-16 border border-[#c78e2b] bg-white/36" />
+                {elements.slice(-10).map((element) => (
+                  <span
+                    key={element.id}
+                    className="absolute h-1.5 w-1.5 rounded-full bg-[#0f1b2e]/50"
+                    style={{
+                      left: `${Math.min(108, Math.max(4, (element.x / WORLD_WIDTH) * 118))}px`,
+                      top: `${Math.min(72, Math.max(4, (element.y / WORLD_HEIGHT) * 82))}px`,
+                    }}
+                  />
+                ))}
                 <Maximize2 size={16} className="absolute bottom-2 right-2 text-[#0f1b2e]" />
               </div>
             </button>
           )}
 
-          <div className="absolute bottom-6 left-6 z-20 flex h-11 items-center rounded-[10px] border border-[#d7dee8] bg-white/94 px-2 shadow-[0_12px_26px_rgba(15,27,46,0.1)]">
+          <div className="absolute bottom-6 left-6 z-20 flex h-11 items-center rounded-[10px] border border-[#d7dee8] bg-white/94 px-2 shadow-[0_12px_26px_rgba(15,27,46,0.1)]" data-canvas-control="true">
             <ZoomButton icon={Minus} label="Diminuir zoom" onClick={() => zoomAt(zoom - 0.1)} />
             <div className="w-16 text-center text-sm font-extrabold text-[#0f1b2e]">{Math.round(zoom * 100)}%</div>
             <ZoomButton icon={Plus} label="Aumentar zoom" onClick={() => zoomAt(zoom + 0.1)} />
@@ -413,12 +944,12 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
               }}
             />
             <ToolbarDivider />
-            <ZoomButton icon={Lock} label="Bloquear zoom" active={locked} onClick={() => setLocked((isLocked) => !isLocked)} />
+            <ZoomButton icon={Lock} label="Bloquear zoom" active={viewportLocked} onClick={() => setViewportLocked((isLocked) => !isLocked)} />
           </div>
         </>
       )}
 
-      <div className={`${mobile ? 'left-4 top-[5.4rem]' : 'left-5 top-5'} absolute z-20 rounded-full border border-white/80 bg-white/80 px-3 py-1.5 text-[0.68rem] font-bold text-[#0f1b2e] shadow-[0_8px_18px_rgba(15,27,46,0.06)]`}>
+      <div className={`${mobile ? 'left-4 top-[5.4rem]' : 'left-5 top-5'} pointer-events-none absolute z-20 rounded-full border border-white/80 bg-white/80 px-3 py-1.5 text-[0.68rem] font-bold text-[#0f1b2e] shadow-[0_8px_18px_rgba(15,27,46,0.06)]`}>
         {getToolLabel(activeToolId)} · {status}
       </div>
     </div>
@@ -442,9 +973,9 @@ export function CanvasStage({ mobile = false, activeToolId = 'select' }: CanvasS
 function getToolLabel(toolId: string) {
   const labels: Record<string, string> = {
     select: 'Selecionar',
-    hand: 'Mão',
+    hand: 'Mao',
     shape: 'Forma',
-    circle: 'Círculo',
+    circle: 'Circulo',
     line: 'Linha',
     arrow: 'Seta',
     text: 'Texto',
@@ -457,15 +988,34 @@ function getToolLabel(toolId: string) {
   return labels[toolId] ?? toolId
 }
 
+function getToolFromShortcut(key: string) {
+  const shortcuts: Record<string, string> = {
+    v: 'select',
+    h: 'hand',
+    r: 'shape',
+    o: 'circle',
+    l: 'line',
+    a: 'arrow',
+    t: 'text',
+    p: 'draw',
+    n: 'note',
+    i: 'image',
+    m: 'motif',
+  }
+
+  return shortcuts[key]
+}
+
 function createCanvasElement(id: string, type: string, point: Point, content?: string, src?: string): CanvasElement {
-  if (type === 'shape') return { id, type: 'shape', x: point.x - 60, y: point.y - 45, width: 120, height: 90 }
-  if (type === 'circle') return { id, type: 'circle', x: point.x - 50, y: point.y - 50, width: 100, height: 100 }
-  if (type === 'line') return { id, type: 'line', x: point.x, y: point.y, width: 160, height: 80 }
-  if (type === 'arrow') return { id, type: 'arrow', x: point.x, y: point.y, width: 160, height: 80 }
-  if (type === 'text') return { id, type: 'text', x: point.x - 90, y: point.y - 28, width: 180, height: 56, content: content ?? 'Texto' }
-  if (type === 'note') return { id, type: 'note', x: point.x - 85, y: point.y - 60, width: 170, height: 120, content: content ?? 'Nova nota' }
-  if (type === 'image') return { id, type: 'image', x: point.x - 90, y: point.y - 70, width: 180, height: 140, src }
-  return { id, type: 'motif', x: point.x - 55, y: point.y - 55, width: 110, height: 110 }
+  const base = { id, x: point.x, y: point.y, ...defaultStyle }
+  if (type === 'shape') return { ...base, type: 'shape', x: point.x - 60, y: point.y - 45, width: 120, height: 90 }
+  if (type === 'circle') return { ...base, type: 'circle', x: point.x - 50, y: point.y - 50, width: 100, height: 100, stroke: '#0f1b2e' }
+  if (type === 'line') return { ...base, type: 'line', width: 160, height: 80, fill: 'transparent', stroke: '#0f1b2e' }
+  if (type === 'arrow') return { ...base, type: 'arrow', width: 160, height: 80, fill: 'transparent', stroke: '#0f1b2e' }
+  if (type === 'text') return { ...base, type: 'text', x: point.x - 90, y: point.y - 28, width: 180, height: 56, content: content ?? 'Texto', fill: 'rgba(255,255,255,0.72)', stroke: '#0f1b2e' }
+  if (type === 'note') return { ...base, type: 'note', x: point.x - 85, y: point.y - 60, width: 170, height: 120, content: content ?? 'Nova nota', fill: '#fff0b8' }
+  if (type === 'image') return { ...base, type: 'image', x: point.x - 90, y: point.y - 70, width: 180, height: 140, src, stroke: '#e2e8f0', fill: '#f3ede5' }
+  return { ...base, type: 'motif', x: point.x - 55, y: point.y - 55, width: 110, height: 110, fill: 'transparent' }
 }
 
 function resizeElementFromDrag(element: CanvasElement, start: Point, end: Point): CanvasElement {
@@ -490,71 +1040,95 @@ function resizeElementFromDrag(element: CanvasElement, start: Point, end: Point)
 type CanvasElementViewProps = {
   element: CanvasElement
   selected: boolean
-  onPointerDown: (event: PointerEvent<HTMLButtonElement>) => void
+  onPointerDown: (event: PointerEvent<HTMLDivElement>) => void
+  onResizePointerDown: (event: PointerEvent<HTMLDivElement>) => void
+  onDoubleClick: (event: React.MouseEvent<HTMLDivElement>) => void
 }
 
-function CanvasElementView({ element, selected, onPointerDown }: CanvasElementViewProps) {
-  if (element.type === 'draw') {
-    return (
-      <button type="button" className="absolute inset-0 cursor-pointer bg-transparent p-0" onPointerDown={onPointerDown} aria-label="Selecionar desenho">
-        <DrawPath points={element.points} selected={selected} />
-      </button>
-    )
-  }
-
+function CanvasElementView({ element, selected, onPointerDown, onResizePointerDown, onDoubleClick }: CanvasElementViewProps) {
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={-1}
       onPointerDown={onPointerDown}
+      onDoubleClick={onDoubleClick}
       className={`absolute cursor-move rounded-[10px] transition ${
         selected ? 'ring-2 ring-[#2563eb] ring-offset-2 ring-offset-[#fffdf7]' : 'hover:ring-2 hover:ring-[#d4af37]/35'
-      }`}
-      style={{ left: element.x, top: element.y, width: element.width, height: element.height }}
+      } ${element.locked ? 'cursor-not-allowed opacity-80' : ''}`}
+      style={{ left: element.x, top: element.y, width: element.width, height: element.height, opacity: element.opacity }}
       aria-label={`Selecionar ${getToolLabel(element.type)}`}
     >
       <CanvasElementBody element={element} />
-    </button>
+
+      {selected && (
+        <>
+          <div className="pointer-events-none absolute -inset-1 rounded-[12px] border border-[#2563eb]/60" />
+          {!element.locked && element.type !== 'draw' && (
+            <div
+              role="button"
+              tabIndex={-1}
+              data-canvas-control="true"
+              onPointerDown={onResizePointerDown}
+              className="absolute -bottom-2 -right-2 h-4 w-4 cursor-nwse-resize rounded-[4px] border border-[#2563eb] bg-white shadow-[0_4px_10px_rgba(15,27,46,0.15)]"
+              aria-label="Redimensionar"
+            />
+          )}
+        </>
+      )}
+    </div>
   )
 }
 
-function CanvasElementBody({ element }: { element: Exclude<CanvasElement, { type: 'draw'; points: Point[] }> }) {
-  if (element.type === 'shape') return <div className="h-full w-full rounded-[10px] border-2 border-[#c78e2b] bg-white/30" />
-  if (element.type === 'circle') return <div className="h-full w-full rounded-full border-2 border-[#0f1b2e] bg-white/20" />
+function CanvasElementBody({ element }: { element: CanvasElement }) {
+  const strokeDasharray = element.strokeStyle === 'dash' ? '10 8' : element.strokeStyle === 'dot' ? '2 8' : undefined
+
+  if (element.type === 'shape') {
+    return <div className="h-full w-full rounded-[10px]" style={{ border: `${element.strokeWidth}px solid ${element.stroke}`, background: element.fill }} />
+  }
+
+  if (element.type === 'circle') {
+    return <div className="h-full w-full rounded-full" style={{ border: `${element.strokeWidth}px solid ${element.stroke}`, background: element.fill }} />
+  }
 
   if (element.type === 'line' || element.type === 'arrow') {
     return (
       <svg viewBox="0 0 100 100" className="h-full w-full overflow-visible" fill="none" aria-hidden="true" preserveAspectRatio="none">
-        <path d="M4 92L96 8" stroke="#0f1b2e" strokeWidth="3" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
-        {element.type === 'arrow' && <path d="M76 8H96V28" stroke="#0f1b2e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
+        <path d="M4 92L96 8" stroke={element.stroke} strokeWidth={element.strokeWidth} strokeDasharray={strokeDasharray} strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+        {element.type === 'arrow' && <path d="M76 8H96V28" stroke={element.stroke} strokeWidth={element.strokeWidth} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />}
       </svg>
     )
   }
 
+  if (element.type === 'draw') {
+    return <DrawPath element={element} selected={false} />
+  }
+
   if (element.type === 'text') {
-    return <div className="flex h-full items-center justify-center whitespace-pre-wrap rounded-[8px] bg-white/70 px-2 text-center text-lg font-semibold text-[#0f1b2e] shadow-[0_8px_18px_rgba(15,27,46,0.08)]">{element.content}</div>
+    return <div className="flex h-full items-center justify-center whitespace-pre-wrap rounded-[8px] px-2 text-center text-lg font-semibold text-[#0f1b2e] shadow-[0_8px_18px_rgba(15,27,46,0.08)]" style={{ background: element.fill }}>{element.content}</div>
   }
 
   if (element.type === 'note') {
-    return <div className="flex h-full items-center justify-center rounded-[8px] border border-[#e3bd68] bg-[#fff0b8] px-3 text-center text-sm font-bold leading-5 text-[#0f1b2e] shadow-[0_10px_18px_rgba(15,27,46,0.1)]">{element.content}</div>
+    return <div className="flex h-full items-center justify-center rounded-[8px] px-3 text-center text-sm font-bold leading-5 text-[#0f1b2e] shadow-[0_10px_18px_rgba(15,27,46,0.1)]" style={{ border: `${element.strokeWidth}px solid ${element.stroke}`, background: element.fill }}>{element.content}</div>
   }
 
   if (element.type === 'image') {
     return element.src ? (
       <img src={element.src} alt="Imagem colada" className="h-full w-full rounded-[8px] object-cover shadow-[0_10px_18px_rgba(15,27,46,0.1)]" />
     ) : (
-      <div className="flex h-full items-center justify-center rounded-[8px] border border-[#e2e8f0] bg-[#f3ede5] text-xs font-bold text-[#64748b]">Imagem</div>
+      <div className="flex h-full items-center justify-center rounded-[8px] text-xs font-bold text-[#64748b]" style={{ border: `${element.strokeWidth}px solid ${element.stroke}`, background: element.fill }}>Imagem</div>
     )
   }
 
   return <CanvasFlowerMark className="h-full w-full text-[#c78e2b]" />
 }
 
-function DrawPath({ points, selected = false }: { points: Point[]; selected?: boolean }) {
-  const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')
+function DrawPath({ element }: { element: CanvasElement; selected?: boolean }) {
+  const points = element.points ?? []
+  const path = points.map((point, index) => `${index === 0 ? 'M' : 'L'} ${point.x - element.x} ${point.y - element.y}`).join(' ')
 
   return (
-    <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" viewBox={`0 0 ${WORLD_WIDTH} ${WORLD_HEIGHT}`} fill="none" aria-hidden="true">
-      <path d={path} stroke={selected ? '#2563eb' : '#0f1b2e'} strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+    <svg className="pointer-events-none h-full w-full overflow-visible" viewBox={`0 0 ${Math.max(1, element.width)} ${Math.max(1, element.height)}`} fill="none" aria-hidden="true">
+      <path d={path} stroke={element.stroke} strokeWidth={element.strokeWidth} strokeLinecap="round" strokeLinejoin="round" vectorEffect="non-scaling-stroke" />
     </svg>
   )
 }
@@ -562,9 +1136,9 @@ function DrawPath({ points, selected = false }: { points: Point[]; selected?: bo
 function CanvasStaticNotes() {
   return (
     <>
-      <CanvasNote className="absolute" style={{ left: WORLD_CENTER.x - 1320, top: WORLD_CENTER.y + 220 }} title="Estrutura" body="Traz clareza ao que é complexo." />
-      <CanvasNote className="absolute" style={{ left: WORLD_CENTER.x + 820, top: WORLD_CENTER.y - 470 }} title="Ideias" body="Nascem da conexão de pensamentos." align="right" />
-      <CanvasNote className="absolute" style={{ left: WORLD_CENTER.x - 120, top: WORLD_CENTER.y + 820 }} title="Propósito" body="Transforme ideias em realidade." centered />
+      <CanvasNote className="absolute" style={{ left: WORLD_CENTER.x - 1320, top: WORLD_CENTER.y + 220 }} title="Estrutura" body="Traz clareza ao que e complexo." />
+      <CanvasNote className="absolute" style={{ left: WORLD_CENTER.x + 820, top: WORLD_CENTER.y - 470 }} title="Ideias" body="Nascem da conexao de pensamentos." align="right" />
+      <CanvasNote className="absolute" style={{ left: WORLD_CENTER.x - 120, top: WORLD_CENTER.y + 820 }} title="Proposito" body="Transforme ideias em realidade." centered />
     </>
   )
 }
@@ -573,7 +1147,7 @@ type CanvasNoteProps = {
   title: string
   body: string
   className: string
-  style?: React.CSSProperties
+  style?: CSSProperties
   align?: 'left' | 'right'
   centered?: boolean
 }
@@ -588,6 +1162,21 @@ function CanvasNote({ title, body, className, style, align = 'left', centered = 
         {body}
       </p>
     </div>
+  )
+}
+
+function CollaborationHints() {
+  return (
+    <>
+      <div className="pointer-events-none absolute left-[4280px] top-[1540px] z-20">
+        <div className="h-0 w-0 border-l-[10px] border-r-[4px] border-t-[16px] border-l-[#2563eb] border-r-transparent border-t-transparent" />
+        <span className="mt-1 inline-flex rounded-full bg-[#2563eb] px-2 py-1 text-[0.65rem] font-bold text-white shadow-[0_8px_18px_rgba(37,99,235,0.22)]">Ana</span>
+      </div>
+      <div className="pointer-events-none absolute left-[2480px] top-[2580px] z-20">
+        <div className="h-0 w-0 border-l-[10px] border-r-[4px] border-t-[16px] border-l-[#0f6a54] border-r-transparent border-t-transparent" />
+        <span className="mt-1 inline-flex rounded-full bg-[#0f6a54] px-2 py-1 text-[0.65rem] font-bold text-white shadow-[0_8px_18px_rgba(15,106,84,0.22)]">Leo</span>
+      </div>
+    </>
   )
 }
 
@@ -648,7 +1237,7 @@ function CanvasOrnamentCluster({ className }: CanvasOrnamentClusterProps) {
 }
 
 type ButtonIconProps = {
-  icon: React.ComponentType<{ size?: number; className?: string }>
+  icon: ComponentType<{ size?: number; className?: string }>
   label: string
   active?: boolean
   onClick: () => void
@@ -656,7 +1245,7 @@ type ButtonIconProps = {
 
 function CanvasToolButton({ icon: Icon, label, active = false, onClick }: ButtonIconProps) {
   return (
-    <button type="button" onClick={onClick} data-active={active} className="ws-icon-button flex h-9 w-9 items-center justify-center rounded-[8px]" aria-label={label} title={label}>
+    <button type="button" onClick={onClick} data-active={active} className="ws-icon-button flex h-9 w-9 items-center justify-center rounded-[8px]" aria-label={label} title={label} data-canvas-control="true">
       <Icon size={18} />
     </button>
   )
@@ -664,7 +1253,7 @@ function CanvasToolButton({ icon: Icon, label, active = false, onClick }: Button
 
 function ZoomButton({ icon: Icon, label, active = false, onClick }: ButtonIconProps) {
   return (
-    <button type="button" onClick={onClick} data-active={active} className={`flex h-9 w-9 items-center justify-center rounded-[8px] ${active ? 'studio-button-active' : 'ws-icon-button'}`} aria-label={label} title={label}>
+    <button type="button" onClick={onClick} data-active={active} className={`flex h-9 w-9 items-center justify-center rounded-[8px] ${active ? 'studio-button-active' : 'ws-icon-button'}`} aria-label={label} title={label} data-canvas-control="true">
       <Icon size={16} />
     </button>
   )
@@ -672,4 +1261,110 @@ function ZoomButton({ icon: Icon, label, active = false, onClick }: ButtonIconPr
 
 function ToolbarDivider() {
   return <span className="mx-1 h-7 w-px bg-[#e2e8f0]" />
+}
+
+function snap(value: number) {
+  return Math.round(value / GRID_SIZE) * GRID_SIZE
+}
+
+function snapPoint(point: Point) {
+  return { x: snap(point.x), y: snap(point.y) }
+}
+
+function cloneElement(element: CanvasElement): CanvasElement {
+  return { ...element, points: element.points?.map((point) => ({ ...point })) }
+}
+
+function toggleIds(current: string[], ids: string[]) {
+  const next = new Set(current)
+
+  ids.forEach((id) => {
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+  })
+
+  return Array.from(next)
+}
+
+function normalizeBox(start: Point, end: Point) {
+  return {
+    x: Math.min(start.x, end.x),
+    y: Math.min(start.y, end.y),
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  }
+}
+
+function intersects(box: { x: number; y: number; width: number; height: number }, element: CanvasElement) {
+  return element.x < box.x + box.width && element.x + element.width > box.x && element.y < box.y + box.height && element.y + element.height > box.y
+}
+
+function getSelectionBounds(elements: CanvasElement[]) {
+  const left = Math.min(...elements.map((element) => element.x))
+  const top = Math.min(...elements.map((element) => element.y))
+  const right = Math.max(...elements.map((element) => element.x + element.width))
+  const bottom = Math.max(...elements.map((element) => element.y + element.height))
+
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+function getPathBounds(points: Point[]) {
+  if (!points.length) {
+    return { x: 0, y: 0, width: 1, height: 1 }
+  }
+
+  const left = Math.min(...points.map((point) => point.x))
+  const top = Math.min(...points.map((point) => point.y))
+  const right = Math.max(...points.map((point) => point.x))
+  const bottom = Math.max(...points.map((point) => point.y))
+
+  return { x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) }
+}
+
+function loadStoredElements() {
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY)
+    if (!stored) return null
+    const parsed = JSON.parse(stored) as { elements?: CanvasElement[] }
+    return Array.isArray(parsed.elements) ? parsed.elements : null
+  } catch {
+    return null
+  }
+}
+
+function downloadFile(name: string, type: string, contents: string) {
+  const blob = new Blob([contents], { type })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = name
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function createSvgExport(elements: CanvasElement[]) {
+  const body = elements.map((element) => {
+    if (element.type === 'shape') return `<rect x="${element.x}" y="${element.y}" width="${element.width}" height="${element.height}" rx="10" fill="${element.fill}" stroke="${element.stroke}" stroke-width="${element.strokeWidth}" opacity="${element.opacity}" />`
+    if (element.type === 'circle') return `<ellipse cx="${element.x + element.width / 2}" cy="${element.y + element.height / 2}" rx="${element.width / 2}" ry="${element.height / 2}" fill="${element.fill}" stroke="${element.stroke}" stroke-width="${element.strokeWidth}" opacity="${element.opacity}" />`
+    if (element.type === 'line' || element.type === 'arrow') return `<line x1="${element.x}" y1="${element.y + element.height}" x2="${element.x + element.width}" y2="${element.y}" stroke="${element.stroke}" stroke-width="${element.strokeWidth}" stroke-linecap="round" opacity="${element.opacity}" />`
+    if (element.type === 'draw') return `<polyline points="${(element.points ?? []).map((point) => `${point.x},${point.y}`).join(' ')}" fill="none" stroke="${element.stroke}" stroke-width="${element.strokeWidth}" stroke-linecap="round" stroke-linejoin="round" opacity="${element.opacity}" />`
+    if (element.type === 'text' || element.type === 'note') return `<text x="${element.x + element.width / 2}" y="${element.y + element.height / 2}" text-anchor="middle" dominant-baseline="middle" fill="#0f1b2e" font-family="Inter, sans-serif" font-size="24" opacity="${element.opacity}">${escapeHtml(element.content ?? '')}</text>`
+    return `<rect x="${element.x}" y="${element.y}" width="${element.width}" height="${element.height}" rx="12" fill="none" stroke="#c78e2b" stroke-width="2" opacity="${element.opacity}" />`
+  }).join('')
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${WORLD_WIDTH} ${WORLD_HEIGHT}" width="${WORLD_WIDTH}" height="${WORLD_HEIGHT}"><rect width="100%" height="100%" fill="#fffdf7" />${body}</svg>`
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#039;',
+    }
+
+    return entities[character]
+  })
 }
